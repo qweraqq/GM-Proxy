@@ -34,9 +34,12 @@ public class SmartClientToServerRelayHandler extends ChannelInboundHandlerAdapte
                 ctx.channel().config().setAutoRead(false);
             }
             return;
+        } else {
+            this.upstream = null;
+            this.isAcquiring = false;
         }
 
-        LOGGER.info("PRXOY <---> Target-Server channel status: {}, Buffering msg & Acquiring new channel", upstream);
+        LOGGER.info("PRXOY <---> Target-Server channel null:, Buffering msg & Acquiring new channel");
 
         // Scenario: Disconnected (Between requests).
         // 1. Buffer the message (Don't lose the "GET /")

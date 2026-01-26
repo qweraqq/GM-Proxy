@@ -55,11 +55,11 @@ public class NettyTLSProxyNG {
                     .childOption(ChannelOption.TCP_NODELAY, true)  // 关闭Nagle算法，降低延迟
                     .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                     .childHandler(new FrontendInitializer());
-
-            b.bind(new InetSocketAddress(BIND_HOST, BIND_PORT)).sync().channel().closeFuture().sync();
             LOGGER.info("=== TLS MITM PROXY listening on {}:{} ===", BIND_HOST, BIND_PORT);
-        } catch (Exception ignored) {
+            b.bind(new InetSocketAddress(BIND_HOST, BIND_PORT)).sync().channel().closeFuture().sync();
 
+        } catch (Exception e) {
+            LOGGER.error("TLS MITM PROXY failed to start on {}:{} with error: {}", BIND_HOST, BIND_PORT, e.getMessage());
         }
     }
 
@@ -82,7 +82,7 @@ public class NettyTLSProxyNG {
         // TLS, which represents TLS 1.3 and TLS 1.2 are supported.
         // TLCPv1.1, which represents only TLCP 1.1 is supported.
         // TLCP, which represents TLCP 1.1, TLS 1.3 and TLS 1.2 are supported.
-        PROXY_CLIENT_SSL_CONTEXT = SSLContext.getInstance("TLCP", "KonaSSL");
+        PROXY_CLIENT_SSL_CONTEXT = SSLContext.getInstance("TLCPv1.1", "KonaSSL");
         PROXY_CLIENT_SSL_CONTEXT.init(
                 null,
                 new TrustManager[]{new Utils.TrustAllManager()},

@@ -1,10 +1,7 @@
 package com.xx;
 
 import io.netty.buffer.Unpooled;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFutureListener;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.*;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.util.ReferenceCountUtil;
 import org.slf4j.Logger;
@@ -40,9 +37,14 @@ public class ProxyToClientRelayHandler extends ChannelInboundHandlerAdapter {
                 // 3. Notify Client to Reset State
                 if (client.isActive()) {
                     SmartClientToServerRelayHandler handler = client.pipeline().get(SmartClientToServerRelayHandler.class);
-                    if (handler != null) {
-                        if (client.eventLoop().inEventLoop()) handler.detachUpstream();
-                        else client.eventLoop().execute(handler::detachUpstream);
+                    try {
+                        if (client.eventLoop().inEventLoop()) {
+                            handler.detachUpstream();
+                        } else {
+                            client.eventLoop().execute(handler::detachUpstream);
+                        }
+                    } catch (Exception ignored) {
+
                     }
                 }
             }

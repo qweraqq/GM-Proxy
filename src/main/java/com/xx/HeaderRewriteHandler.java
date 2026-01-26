@@ -19,7 +19,8 @@ public class HeaderRewriteHandler extends ChannelDuplexHandler {
     }
 
     @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-        super.channelRead(ctx, msg);
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        // seems NOT matters
+        // JUST make silent
     }
 }

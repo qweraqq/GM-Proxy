@@ -101,5 +101,10 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
 
     }
 
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        // seems NOT matters
+        // JUST make silent
+    }
 
 }
