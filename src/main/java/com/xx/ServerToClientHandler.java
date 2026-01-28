@@ -8,7 +8,7 @@ import org.slf4j.LoggerFactory;
 
 public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerToClientHandler.class);
-    private Channel client;
+    private final Channel client;
 
     public ServerToClientHandler(Channel client) {
         this.client = client;
@@ -20,72 +20,46 @@ public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
         ctx.read();
     }
 
-    /**
-     * Calls {@link ChannelHandlerContext#fireChannelInactive()} to forward
-     * to the next {@link ChannelInboundHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     */
     @Override
-    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+    public void channelInactive(ChannelHandlerContext ctx) {
         if (client != null && client.isActive()) {
             client.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
+            // client.writeAndFlush(new DefaultLastHttpContent()).addListener(ChannelFutureListener.CLOSE);
+        }
+        if (client != null) {
+            client.close();
         }
     }
 
-    /**
-     * Calls {@link ChannelHandlerContext#fireChannelRead(Object)} to forward
-     * to the next {@link ChannelInboundHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     * @param msg
-     */
     @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-        LOGGER.info("ServerToClientHandler channelRead, client {}, client_status {}", client, client.isActive());
-        if (client != null && client.isActive()) {
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        if (client.isActive()) {
+            LOGGER.info("Target-Server {} >>> FORWARDING >>> CLIENT {} ", ctx.channel(), client);
             client.writeAndFlush(msg).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
             if (!client.isWritable()) {
                 ctx.channel().config().setAutoRead(false);
             }
         } else {
+            // Just in case
             ReferenceCountUtil.release(msg);
+            client.close();
         }
     }
 
-
-    /**
-     * Calls {@link ChannelHandlerContext#fireChannelWritabilityChanged()} to forward
-     * to the next {@link ChannelInboundHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     */
     @Override
-    public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
+    public void channelWritabilityChanged(ChannelHandlerContext ctx) {
         if (ctx.channel().isWritable() && client!= null && client.isActive()) {
             client.config().setAutoRead(true);
         }
         ctx.fireChannelWritabilityChanged();
     }
 
-    /**
-     * Calls {@link ChannelHandlerContext#fireExceptionCaught(Throwable)} to forward
-     * to the next {@link ChannelHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     * @param cause
-     */
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        LOGGER.info("Server to Client Channel Exception", cause);
         ctx.close();
-        client.close();
+        if(client != null) {
+            client.close();
+        }
     }
 }

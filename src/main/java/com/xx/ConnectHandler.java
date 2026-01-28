@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
-import java.net.InetSocketAddress;
 
 import static com.xx.NettyTLSProxyNG.PROXY_SERVER_SSL_CONTEXT;
 
@@ -54,6 +53,7 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
         SSLEngine serverEngine = serverContext.createSSLEngine();
         serverEngine.setUseClientMode(false);
         clientCtx.pipeline().addFirst("ssl", new SslHandler(serverEngine));
+        clientCtx.pipeline().addLast("codec", new HttpServerCodec());
         clientCtx.pipeline().addLast( new ClientToServerHandler(host, port));
         clientCtx.channel().config().setAutoRead(true);
 

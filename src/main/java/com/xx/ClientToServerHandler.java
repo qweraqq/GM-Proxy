@@ -3,6 +3,7 @@ package com.xx;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
+import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.ReferenceCountUtil;
 import org.slf4j.Logger;
@@ -11,19 +12,17 @@ import org.slf4j.LoggerFactory;
 import javax.net.ssl.SSLEngine;
 import java.util.LinkedList;
 import java.util.Queue;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.xx.NettyTLSProxyNG.PROXY_CLIENT_SSL_CONTEXT;
 
 public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
     private static final Logger LOGGER = LoggerFactory.getLogger(ClientToServerHandler.class);
     private Channel upstream;
-    private String host;
-    private int port;
+    private final String host;
+    private final int port;
 
-    private final Lock lock = new ReentrantLock();
-    private volatile boolean isAcquiring = false;
+    private final AtomicBoolean upstreamAcquired = new AtomicBoolean(false);
     private final Queue<Object> pendingBuffer = new LinkedList<>();
 
     public ClientToServerHandler(String host, int port) {
@@ -31,65 +30,33 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
         this.port = port;
     }
 
-
-    /**
-     * Calls {@link ChannelHandlerContext#fireChannelActive()} to forward
-     * to the next {@link ChannelInboundHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     */
     @Override
-    public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        super.channelActive(ctx);
-    }
-
-    /**
-     * Calls {@link ChannelHandlerContext#fireChannelInactive()} to forward
-     * to the next {@link ChannelInboundHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     */
-    @Override
-    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        releasePendingBuffer();
+    public void channelInactive(ChannelHandlerContext ctx) {
+        releasePendingBuffer(ctx);
         ctx.close();
         if (upstream != null && upstream.isActive()) {
             upstream.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
         }
     }
 
-    /**
-     * Calls {@link ChannelHandlerContext#fireChannelRead(Object)} to forward
-     * to the next {@link ChannelInboundHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     * @param msg
-     */
+
     @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (upstream != null && upstream.isActive()) {
-            upstream.writeAndFlush(msg);
+            LOGGER.info("CLIENT {} >>> FORWARDING >>> Target-Server {} ", ctx.channel(), upstream);
+            upstream.writeAndFlush(msg).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
             // FLOW CONTROL
             if (!upstream.isWritable()) {
                 ctx.channel().config().setAutoRead(false);
             }
         } else {
             // just record msg when upstream is not ready
-            lock.lock();
-            try {
+            synchronized (pendingBuffer) {
                 pendingBuffer.add(msg);
-            } finally {
-                lock.unlock();
             }
 
-            if (! this.isAcquiring) {
-                this.isAcquiring = true;
+            // upstream will be acquired only once
+            if (upstreamAcquired.compareAndSet(false, true)) {
                 acquireUpstream(ctx);
             }
         }
@@ -99,16 +66,15 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
         Bootstrap b = new Bootstrap()
                 .group(ctx.channel().eventLoop())
                 .channel(ctx.channel().getClass())
-                .option(ChannelOption.TCP_NODELAY, true)
-                .option(ChannelOption.SO_KEEPALIVE, true)
                 .handler(new ChannelInitializer<>() {
                     @Override
-                    protected void initChannel(Channel ch) throws Exception {
+                    protected void initChannel(Channel ch) {
                         SSLEngine gmEngine = PROXY_CLIENT_SSL_CONTEXT.createSSLEngine(
                                 host,
                                 port);
                         gmEngine.setUseClientMode(true);
                         ch.pipeline().addLast("ssl", new SslHandler(gmEngine));
+                        ch.pipeline().addLast("codec", new HttpClientCodec());
                     }
                 });
         b.connect(host, port).addListener((ChannelFutureListener) f -> {
@@ -122,7 +88,8 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
                 remoteChannel.config().setAutoRead(true);
                 clientChannel.config().setAutoRead(true);
             } else {
-                releasePendingBuffer();
+                LOGGER.error("Failed to connect to remote server, client channel {}", ctx.channel());
+                releasePendingBuffer(ctx);
                 ctx.close();
             }
         });
@@ -130,43 +97,38 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
     }
 
     private void flushPendingBufferToUpstream(ChannelHandlerContext ctx) {
-        lock.lock();
         LOGGER.info("Pending size {}, upstream {}, upstream active {}", pendingBuffer.size(), upstream, upstream.isActive());
-        try {
-            if (upstream != null && upstream.isActive()) {
-                for (Object m : pendingBuffer) {
-                    upstream.writeAndFlush(m);
-                    // FLOW CONTROL
+        if (upstream != null && upstream.isActive()) {
+            synchronized (pendingBuffer) {
+                while (!pendingBuffer.isEmpty()) {
+                    upstream.writeAndFlush(pendingBuffer.poll()).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
                     if (!upstream.isWritable()) {
                         ctx.channel().config().setAutoRead(false);
                     }
                 }
             }
-            pendingBuffer.clear();
-        } finally {
-            lock.unlock();
+        } else {
+            // upstream not ready? / upstream error ?
+            // should not happen, just in case
+            LOGGER.error("Flush pending buffer to upstream failed, upstream {}", upstream);
+            releasePendingBuffer(ctx);
+            ctx.close();
+            if(upstream != null ) {
+                upstream.close();
+            }
         }
     }
 
-    private void releasePendingBuffer() {
-        lock.lock();
-        try {
-            for (Object msg : pendingBuffer) ReferenceCountUtil.release(msg);
-            pendingBuffer.clear();
-        } finally {
-            lock.unlock();
+    private void releasePendingBuffer(ChannelHandlerContext ctx) {
+        synchronized (pendingBuffer) {
+            LOGGER.info("Releasing pending buffer (size {}) on channel {}", pendingBuffer.size(), ctx.channel());
+            while (!pendingBuffer.isEmpty()) {
+                ReferenceCountUtil.release(pendingBuffer.poll());
+            }
         }
     }
 
 
-    /**
-     * Calls {@link ChannelHandlerContext#fireChannelWritabilityChanged()} to forward
-     * to the next {@link ChannelInboundHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     */
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
         super.channelWritabilityChanged(ctx);
@@ -176,18 +138,10 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
         ctx.fireChannelWritabilityChanged();
     }
 
-    /**
-     * Calls {@link ChannelHandlerContext#fireExceptionCaught(Throwable)} to forward
-     * to the next {@link ChannelHandler} in the {@link ChannelPipeline}.
-     * <p>
-     * Sub-classes may override this method to change behavior.
-     *
-     * @param ctx
-     * @param cause
-     */
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-        releasePendingBuffer();
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+        LOGGER.info("Client to Server Channel Exception", cause);
+        releasePendingBuffer(ctx);
         ctx.close();
         if(upstream != null ) {
             upstream.close();

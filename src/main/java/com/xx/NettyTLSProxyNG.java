@@ -3,7 +3,6 @@ package com.xx;
 import com.tencent.kona.crypto.KonaCryptoProvider;
 import com.tencent.kona.pkix.KonaPKIXProvider;
 import com.tencent.kona.ssl.KonaSSLProvider;
-import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.*;
@@ -11,11 +10,8 @@ import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.pool.*;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
-import io.netty.handler.ssl.SslHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,13 +21,12 @@ import javax.net.ssl.TrustManager;
 import java.net.InetSocketAddress;
 import java.security.Security;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 
 public class NettyTLSProxyNG {
     private static final Logger LOGGER = LoggerFactory.getLogger(NettyTLSProxyNG.class);
 
-    private static String BIND_HOST = "127.0.0.1";
+    private static String BIND_HOST = "0.0.0.0";
     private static int BIND_PORT = 8081;
 
     // Client <---> Proxy
@@ -52,12 +47,10 @@ public class NettyTLSProxyNG {
                     .group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
                     .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                    .childOption(ChannelOption.SO_KEEPALIVE, true) // 开启TCP心跳
-                    .childOption(ChannelOption.TCP_NODELAY, true)  // 关闭Nagle算法，降低延迟
                     .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
                     .childHandler(new ChannelInitializer<SocketChannel>() {
                         @Override
-                        protected void initChannel(SocketChannel ch) throws Exception {
+                        protected void initChannel(SocketChannel ch) {
                             ChannelPipeline p = ch.pipeline();
                             p.addLast(new HttpServerCodec());
                             p.addLast(new HttpObjectAggregator(1 << 20));
@@ -92,7 +85,7 @@ public class NettyTLSProxyNG {
         // TLS, which represents TLS 1.3 and TLS 1.2 are supported.
         // TLCPv1.1, which represents only TLCP 1.1 is supported.
         // TLCP, which represents TLCP 1.1, TLS 1.3 and TLS 1.2 are supported.
-        PROXY_CLIENT_SSL_CONTEXT = SSLContext.getInstance("TLCP", "KonaSSL");
+        PROXY_CLIENT_SSL_CONTEXT = SSLContext.getInstance("TLCPv1.1", "KonaSSL");
         PROXY_CLIENT_SSL_CONTEXT.init(
                 null,
                 new TrustManager[]{new Utils.TrustAllManager()},
