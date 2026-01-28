@@ -1,7 +1,7 @@
 package com.xx;
 
-import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
+import io.netty.handler.codec.http.*;
 import io.netty.util.ReferenceCountUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerToClientHandler.class);
     private final Channel client;
+    private boolean responseComplete = false;
 
     public ServerToClientHandler(Channel client) {
         this.client = client;
@@ -22,11 +23,7 @@ public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        if (client != null && client.isActive()) {
-            client.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
-            // client.writeAndFlush(new DefaultLastHttpContent()).addListener(ChannelFutureListener.CLOSE);
-        }
-        if (client != null) {
+        if (!responseComplete && client != null && client.isActive()) {
             client.close();
         }
     }
@@ -35,9 +32,24 @@ public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (client.isActive()) {
             LOGGER.info("Target-Server {} >>> FORWARDING >>> CLIENT {} ", ctx.channel(), client);
+//            if (msg instanceof HttpResponse resp) {
+//
+//                // Enforce deterministic framing
+//                HttpHeaders h = resp.headers();
+//                h.remove(HttpHeaderNames.PROXY_CONNECTION);
+//                h.remove(HttpHeaderNames.TRANSFER_ENCODING);
+//                h.remove(HttpHeaderNames.UPGRADE);
+//
+//                // Disable keep-alive to prevent truncation
+//                // h.set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
+//            }
             client.writeAndFlush(msg).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
             if (!client.isWritable()) {
                 ctx.channel().config().setAutoRead(false);
+            }
+
+            if (msg instanceof LastHttpContent) {
+                responseComplete = true;
             }
         } else {
             // Just in case

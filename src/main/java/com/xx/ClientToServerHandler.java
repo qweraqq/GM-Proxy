@@ -140,7 +140,7 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        LOGGER.info("Client to Server Channel Exception", cause);
+        LOGGER.info("Client to Server Channel Exception {}", cause.getMessage());
         releasePendingBuffer(ctx);
         ctx.close();
         if(upstream != null ) {
