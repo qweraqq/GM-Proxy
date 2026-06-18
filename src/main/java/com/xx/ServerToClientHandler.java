@@ -9,7 +9,6 @@ import org.slf4j.LoggerFactory;
 public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerToClientHandler.class);
     private final Channel client;
-    private boolean responseComplete = false;
 
     public ServerToClientHandler(Channel client) {
         this.client = client;
@@ -17,44 +16,25 @@ public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
 
 
     @Override
-    public void channelActive(ChannelHandlerContext ctx) {
-        ctx.read();
-    }
-
-    @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        if (!responseComplete && client != null && client.isActive()) {
-            client.close();
-        }
+        ctx.fireChannelInactive();
     }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
         if (client.isActive()) {
-            LOGGER.info("Target-Server {} >>> FORWARDING >>> CLIENT {} ", ctx.channel(), client);
-//            if (msg instanceof HttpResponse resp) {
-//
-//                // Enforce deterministic framing
-//                HttpHeaders h = resp.headers();
-//                h.remove(HttpHeaderNames.PROXY_CONNECTION);
-//                h.remove(HttpHeaderNames.TRANSFER_ENCODING);
-//                h.remove(HttpHeaderNames.UPGRADE);
-//
-//                // Disable keep-alive to prevent truncation
-//                // h.set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
-//            }
-            client.writeAndFlush(msg).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
+            LOGGER.info("Target-Server {} >>> FORWARDING >>> CLIENT {}", ctx.channel(), client);
+            client.writeAndFlush(msg);
             if (!client.isWritable()) {
                 ctx.channel().config().setAutoRead(false);
             }
+//            if (msg instanceof LastHttpContent) {
+//            }
 
-            if (msg instanceof LastHttpContent) {
-                responseComplete = true;
-            }
         } else {
+            LOGGER.error("Target-Server {} >>> FORWARD ERROR, NO active client", ctx.channel());
             // Just in case
             ReferenceCountUtil.release(msg);
-            client.close();
         }
     }
 
@@ -67,11 +47,9 @@ public class ServerToClientHandler extends ChannelInboundHandlerAdapter {
     }
 
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        LOGGER.info("Server to Client Channel Exception", cause);
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable ignored) {
+        LOGGER.info("Server to Client Channel Exception {}", ctx.channel());
         ctx.close();
-        if(client != null) {
-            client.close();
-        }
+        Utils.closeOnFlush(client);
     }
 }

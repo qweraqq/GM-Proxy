@@ -1,28 +1,27 @@
 package com.xx;
 
 import io.netty.bootstrap.Bootstrap;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Promise;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLEngine;
 import java.util.LinkedList;
 import java.util.Queue;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.xx.NettyTLSProxyNG.PROXY_CLIENT_SSL_CONTEXT;
 
 public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
     private static final Logger LOGGER = LoggerFactory.getLogger(ClientToServerHandler.class);
-    private Channel upstream;
+    private Promise<Channel> upstreamPromise;
     private final String host;
     private final int port;
 
-    private final AtomicBoolean upstreamAcquired = new AtomicBoolean(false);
     private final Queue<Object> pendingBuffer = new LinkedList<>();
 
     public ClientToServerHandler(String host, int port) {
@@ -30,39 +29,21 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
         this.port = port;
     }
 
-    @Override
-    public void channelInactive(ChannelHandlerContext ctx) {
-        releasePendingBuffer(ctx);
-        ctx.close();
-        if (upstream != null && upstream.isActive()) {
-            upstream.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
-        }
-    }
-
-
-    @Override
-    public void channelRead(ChannelHandlerContext ctx, Object msg) {
-        if (upstream != null && upstream.isActive()) {
-            LOGGER.info("CLIENT {} >>> FORWARDING >>> Target-Server {} ", ctx.channel(), upstream);
-            upstream.writeAndFlush(msg).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
-            // FLOW CONTROL
-            if (!upstream.isWritable()) {
-                ctx.channel().config().setAutoRead(false);
-            }
-        } else {
-            // just record msg when upstream is not ready
-            synchronized (pendingBuffer) {
-                pendingBuffer.add(msg);
-            }
-
-            // upstream will be acquired only once
-            if (upstreamAcquired.compareAndSet(false, true)) {
-                acquireUpstream(ctx);
+    @SuppressWarnings("resource")
+    private Future<Channel> getOrAcquireUpstream(ChannelHandlerContext ctx) {
+        if (upstreamPromise != null) {
+            if (upstreamPromise.isDone()) {
+                if (upstreamPromise.isSuccess() && upstreamPromise.getNow().isActive()) {
+                    return upstreamPromise;
+                } else {
+                    upstreamPromise = null;
+                }
+            } else {
+                return upstreamPromise;
             }
         }
-    }
 
-    private void acquireUpstream(ChannelHandlerContext ctx) {
+        upstreamPromise = ctx.executor().newPromise();
         Bootstrap b = new Bootstrap()
                 .group(ctx.channel().eventLoop())
                 .channel(ctx.channel().getClass())
@@ -83,48 +64,78 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
                 Channel clientChannel = ctx.channel();
 
                 remoteChannel.pipeline().addLast(new ServerToClientHandler(clientChannel));
-                this.upstream = remoteChannel;
-                flushPendingBufferToUpstream(ctx);
+                upstreamPromise.setSuccess(remoteChannel);
+                while (!pendingBuffer.isEmpty()) {
+                    remoteChannel.write(pendingBuffer.poll());
+                }
+                remoteChannel.flush();
+                LOGGER.info("Client {} >>> CONNECT >>> Target Server {} ", clientChannel, remoteChannel);
                 remoteChannel.config().setAutoRead(true);
                 clientChannel.config().setAutoRead(true);
+
             } else {
                 LOGGER.error("Failed to connect to remote server, client channel {}", ctx.channel());
                 releasePendingBuffer(ctx);
                 ctx.close();
             }
         });
-
+        return upstreamPromise;
     }
 
-    private void flushPendingBufferToUpstream(ChannelHandlerContext ctx) {
-        LOGGER.info("Pending size {}, upstream {}, upstream active {}", pendingBuffer.size(), upstream, upstream.isActive());
-        if (upstream != null && upstream.isActive()) {
-            synchronized (pendingBuffer) {
-                while (!pendingBuffer.isEmpty()) {
-                    upstream.writeAndFlush(pendingBuffer.poll()).addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
-                    if (!upstream.isWritable()) {
-                        ctx.channel().config().setAutoRead(false);
-                    }
+    // Helper method to keep your memory safe
+    private void safelyBufferMessage(ChannelHandlerContext ctx, Object msg) {
+        if (pendingBuffer.size() >= 10) { // High-Water Mark
+            LOGGER.warn("Buffer is full on {}, Force close it", ctx.channel());
+            ReferenceCountUtil.release(msg);
+            releasePendingBuffer(ctx);
+            ctx.close(); // The client is sending too much while upstream is down
+            return;
+        }
+        pendingBuffer.add(msg);
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) {
+        ctx.close();
+        releasePendingBuffer(ctx);
+        if (upstreamPromise != null) {
+            if (upstreamPromise.isDone()) {
+                if (upstreamPromise.isSuccess() && upstreamPromise.getNow().isActive()) {
+                    Utils.closeOnFlush(upstreamPromise.getNow());
                 }
             }
-        } else {
-            // upstream not ready? / upstream error ?
-            // should not happen, just in case
-            LOGGER.error("Flush pending buffer to upstream failed, upstream {}", upstream);
-            releasePendingBuffer(ctx);
-            ctx.close();
-            if(upstream != null ) {
-                upstream.close();
-            }
         }
+        ctx.fireChannelInactive();
     }
 
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        Future<Channel> future = getOrAcquireUpstream(ctx);
+
+        if (future.isSuccess()) {
+            // FAST PATH: Upstream is connected. Write and flush immediately.
+            future.getNow().writeAndFlush(msg);
+            LOGGER.info("Client {} >>> FORWARDING >>> Target Server {} ", ctx.channel(), future.getNow());
+        } else if (future.isDone()) {
+            // PENDING PATH: Connection is in flight.
+            safelyBufferMessage(ctx, msg);
+        } else {
+            // The previous promise is dead. Calling this again forces a
+            // brand-new connection attempt to flush our newly cached message.
+            safelyBufferMessage(ctx, msg);
+            getOrAcquireUpstream(ctx);
+        }
+
+    }
+
+
     private void releasePendingBuffer(ChannelHandlerContext ctx) {
-        synchronized (pendingBuffer) {
+        if (! pendingBuffer.isEmpty()) {
             LOGGER.info("Releasing pending buffer (size {}) on channel {}", pendingBuffer.size(), ctx.channel());
-            while (!pendingBuffer.isEmpty()) {
-                ReferenceCountUtil.release(pendingBuffer.poll());
-            }
+        }
+        while (!pendingBuffer.isEmpty()) {
+            ReferenceCountUtil.release(pendingBuffer.poll());
         }
     }
 
@@ -132,19 +143,29 @@ public class ClientToServerHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext ctx) throws Exception {
         super.channelWritabilityChanged(ctx);
-        if (ctx.channel().isWritable() && upstream != null && upstream.isActive()) {
-            upstream.config().setAutoRead(true);
+        if (ctx.channel().isWritable()) {
+            if (upstreamPromise != null) {
+                if (upstreamPromise.isDone()) {
+                    if (upstreamPromise.isSuccess() && upstreamPromise.getNow().isActive()) {
+                        upstreamPromise.getNow().config().setAutoRead(true);
+                    }
+                }
+            }
         }
         ctx.fireChannelWritabilityChanged();
     }
 
     @Override
-    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        LOGGER.info("Client to Server Channel Exception {}", cause.getMessage());
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable ignored) {
+        LOGGER.info("Client to Server Channel Exception {}", ctx.channel());
         releasePendingBuffer(ctx);
-        ctx.close();
-        if(upstream != null ) {
-            upstream.close();
+        Utils.closeOnFlush(ctx.channel());
+        if (upstreamPromise != null) {
+            if (upstreamPromise.isDone()) {
+                if (upstreamPromise.isSuccess() && upstreamPromise.getNow().isActive()) {
+                    Utils.closeOnFlush(upstreamPromise.getNow());
+                }
+            }
         }
 
     }

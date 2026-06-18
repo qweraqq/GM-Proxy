@@ -26,7 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class NettyTLSProxyNG {
     private static final Logger LOGGER = LoggerFactory.getLogger(NettyTLSProxyNG.class);
 
-    private static String BIND_HOST = "0.0.0.0";
+    private static String BIND_HOST = "127.0.0.1";
     private static int BIND_PORT = 8081;
 
     // Client <---> Proxy
