@@ -32,6 +32,7 @@ public final class SimpleBlindRelayHandler extends ChannelInboundHandlerAdapter 
             }
         } else {
             ReferenceCountUtil.release(msg);
+            peer.close();
         }
     }
 
@@ -46,6 +47,7 @@ public final class SimpleBlindRelayHandler extends ChannelInboundHandlerAdapter 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
         if (peer != null && peer.isActive()) {
+            // peer.close();
             peer.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
         }
     }

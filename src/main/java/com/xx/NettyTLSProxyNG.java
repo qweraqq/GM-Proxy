@@ -3,16 +3,15 @@ package com.xx;
 import com.tencent.kona.crypto.KonaCryptoProvider;
 import com.tencent.kona.pkix.KonaPKIXProvider;
 import com.tencent.kona.ssl.KonaSSLProvider;
-import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.pool.*;
+import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.channel.socket.nio.NioSocketChannel;
-import io.netty.handler.codec.http.HttpClientCodec;
-import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.codec.http.HttpObjectAggregator;
+import io.netty.handler.codec.http.HttpServerCodec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,7 +21,6 @@ import javax.net.ssl.TrustManager;
 import java.net.InetSocketAddress;
 import java.security.Security;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 
 public class NettyTLSProxyNG {
@@ -35,7 +33,6 @@ public class NettyTLSProxyNG {
     public static SSLContext PROXY_CLIENT_SSL_CONTEXT;
 
     // Proxy <---> Server
-    public static AbstractChannelPoolMap<AffinedPoolKey, SimpleChannelPool> UPSTREAM_POOL_MAP;
     public static final ConcurrentHashMap<String, SSLContext> PROXY_SERVER_SSL_CONTEXT = new ConcurrentHashMap<>();
 
 
@@ -46,15 +43,21 @@ public class NettyTLSProxyNG {
                 EventLoopGroup workerGroup = new MultiThreadIoEventLoopGroup(0, NioIoHandler.newFactory())
         ) {
             initGlobalSslContext();
-            initPoolMap();
             ServerBootstrap b = new ServerBootstrap()
                     .group(bossGroup, workerGroup)
                     .channel(NioServerSocketChannel.class)
                     .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                    .childOption(ChannelOption.SO_KEEPALIVE, true) // 开启TCP心跳
-                    .childOption(ChannelOption.TCP_NODELAY, true)  // 关闭Nagle算法，降低延迟
                     .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                    .childHandler(new FrontendInitializer());
+                    .childHandler(new ChannelInitializer<SocketChannel>() {
+                        @Override
+                        protected void initChannel(SocketChannel ch) {
+                            ChannelPipeline p = ch.pipeline();
+                            p.addLast(new HttpServerCodec());
+                            p.addLast(new HttpObjectAggregator(1 << 20));
+                            p.addLast(new ConnectHandler());
+                        }
+
+                    });
             LOGGER.info("=== TLS MITM PROXY listening on {}:{} ===", BIND_HOST, BIND_PORT);
             b.bind(new InetSocketAddress(BIND_HOST, BIND_PORT)).sync().channel().closeFuture().sync();
 
@@ -102,77 +105,6 @@ public class NettyTLSProxyNG {
 
     }
 
-
-    private static void initPoolMap() {
-        UPSTREAM_POOL_MAP = new AbstractChannelPoolMap<>() {
-            @Override
-            protected SimpleChannelPool newPool(AffinedPoolKey key) {
-                // FORCE the Bootstrap to use the key's EventLoop
-                // This ensures Inbound and Outbound traffic stay on the SAME thread.
-                Bootstrap b = new Bootstrap()
-                        .group(key.eventLoop())
-                        .channel(NioSocketChannel.class)
-                        .option(ChannelOption.TCP_NODELAY, true)
-                        .option(ChannelOption.SO_KEEPALIVE, true) // Keep socket open!
-                        .remoteAddress(key.address());
-
-
-                return new FixedChannelPool(b, new AbstractChannelPoolHandler() {
-                    @Override
-                    public void channelCreated(Channel ch) {
-                        // GM Handshake (Once per physical connection)
-                        SSLEngine gmEngine = PROXY_CLIENT_SSL_CONTEXT.createSSLEngine(
-                                key.address().getHostString(),
-                                key.address().getPort());
-                        gmEngine.setUseClientMode(true);
-                        ch.pipeline().addLast("ssl", new SslHandler(gmEngine));
-
-                        // HTTP Codec (Needed for Header Rewriting)
-                        ch.pipeline().addLast("codec", new HttpClientCodec());
-
-                        ch.attr(Magic.RELEASE_GUARD).set(new AtomicBoolean(true));
-                        LOGGER.info("PROXY <---> Target-Server({}) channel {} created", key.address(), ch);
-                    }
-
-                    @Override
-                    public void channelAcquired(Channel ch) {
-                        // Mark as "Leased"
-                        ch.attr(Magic.RELEASE_GUARD).get().set(false);
-
-                        // Remove the "Idle Guard" (The Alarm)
-                        // When the connection was sitting in the pool, it had a "PoolCleanerHandler"
-                        // watching for garbage data. We must remove this, otherwise valid
-                        // response data from the server would be detected as garbage and killed.
-                        if (ch.pipeline().get(PoolCleanerHandler.class) != null) {
-                            ch.pipeline().remove(PoolCleanerHandler.class);
-                        }
-
-                        if (ch.pipeline().get(DebugTraceHandler.class) != null)
-                            ch.pipeline().remove(DebugTraceHandler.class);
-
-                        // ch.pipeline().addAfter("codec", "logger", new DebugTraceHandler("UPSTREAM-" + ch.id().asShortText()));
-
-                        // Wake up
-                        ch.config().setAutoRead(true);
-                        ch.flush();
-                        LOGGER.info("PROXY <---> Target-Server({}) channel {} acquired", key.address(), ch);
-                    }
-
-                    @Override
-                    public void channelReleased(Channel ch) {
-                        // Ensure the socket is listening so the Cleaner can actually hear the garbage.
-                        ch.config().setAutoRead(true);
-                        LOGGER.info("PROXY <---> Target-Server({}) channel {} released", key.address(), ch);
-                    }
-                },
-                        ChannelHealthChecker.ACTIVE,
-                        FixedChannelPool.AcquireTimeoutAction.FAIL,
-                        2000,
-                        10,  // Lower limit per-thread (10 * Cores = Total Capacity)
-                        200);
-            }
-        };
-    }
 
 
 }

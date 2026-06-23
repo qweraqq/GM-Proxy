@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
-import java.net.InetSocketAddress;
 
 import static com.xx.NettyTLSProxyNG.PROXY_SERVER_SSL_CONTEXT;
 
@@ -35,12 +34,29 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
 
             if (TrafficSelector.isTarget(host, port)) {
                 LOGGER.info("CLIENT <---> TLS MITM PROXY <---> Target-Sever({}:{})", host, port);
-                startAffinedPooledHttpsMitm(ctx, host, port);
+                startMitmTunnel(ctx, host, port);
             } else {
                 LOGGER.info("CLIENT <---> FAST PATH <---> Target-Sever({}:{})", host, port);
                 startBlindTunnel(ctx, host, port);
             }
         }
+    }
+
+    private void startMitmTunnel(ChannelHandlerContext clientCtx, String host, int port) {
+        SSLContext serverContext = PROXY_SERVER_SSL_CONTEXT.computeIfAbsent(host, h -> {
+            try {
+                return EccCertCache.getServerContext(h);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        SSLEngine serverEngine = serverContext.createSSLEngine();
+        serverEngine.setUseClientMode(false);
+        clientCtx.pipeline().addFirst("ssl", new SslHandler(serverEngine));
+        clientCtx.pipeline().addLast("codec", new HttpServerCodec());
+        clientCtx.pipeline().addLast( new ClientToServerHandler(host, port));
+        clientCtx.channel().config().setAutoRead(true);
+
     }
 
     private void startBlindTunnel(ChannelHandlerContext clientCtx, String host, int port) {
@@ -70,36 +86,7 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
     }
 
 
-    /*
-     *
-     *
-     */
-    private void startAffinedPooledHttpsMitm(ChannelHandlerContext clientCtx, String host, int port) {
 
-        try {
-            SSLContext serverContext = PROXY_SERVER_SSL_CONTEXT.computeIfAbsent(host, h -> {
-                try {
-                    return EccCertCache.getServerContext(h);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
-                }
-            });
-            SSLEngine serverEngine = serverContext.createSSLEngine();
-            serverEngine.setUseClientMode(false);
-            clientCtx.pipeline().addFirst("ssl", new SslHandler(serverEngine));
-            clientCtx.pipeline().addAfter("ssl", "codec", new HttpServerCodec());
-            AffinedPoolKey key = new AffinedPoolKey(
-                    clientCtx.channel().eventLoop(),
-                    new InetSocketAddress(host, port));
-            clientCtx.pipeline().addLast("smartRelay", new SmartClientToServerRelayHandler(key));
-            // clientCtx.pipeline().addAfter("smartRelay", "client-logger", new DebugTraceHandler("CLIENT"));
-            clientCtx.fireChannelActive();
-        } catch (Exception e) {
-            clientCtx.close();
-        }
-
-
-    }
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
