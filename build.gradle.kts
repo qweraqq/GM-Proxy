@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.xx"
-version = "10.5.0"
+version = "10.5.5"
 
 repositories {
     mavenCentral()
@@ -21,14 +21,14 @@ application {
 }
 
 dependencies {
-    implementation("io.netty:netty-all:4.2.15.Final")
-    implementation("io.netty:netty-transport-native-epoll:4.2.15.Final")
-    implementation("org.bouncycastle:bcpkix-jdk18on:1.84")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.84")
-    implementation("com.tencent.kona:kona-crypto:1.0.22")
-    implementation("com.tencent.kona:kona-pkix:1.0.22")
-    implementation("com.tencent.kona:kona-ssl:1.0.22")
-    implementation("com.tencent.kona:kona-provider:1.0.22")
+    implementation("io.netty:netty-all:4.2.17.Final")
+    implementation("io.netty:netty-transport-native-epoll:4.2.17.Final")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.85")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.85")
+    implementation("com.tencent.kona:kona-crypto:1.0.24")
+    implementation("com.tencent.kona:kona-pkix:1.0.24")
+    implementation("com.tencent.kona:kona-ssl:1.0.24")
+    implementation("com.tencent.kona:kona-provider:1.0.24")
     implementation("org.slf4j:slf4j-api:2.0.18")
     implementation("org.slf4j:slf4j-simple:2.0.18")
 }
