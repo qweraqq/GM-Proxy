@@ -36,9 +36,38 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
                 LOGGER.info("CLIENT <---> TLS MITM PROXY <---> Target-Sever({}:{})", host, port);
                 startMitmTunnel(ctx, host, port);
             } else {
-                LOGGER.info("CLIENT <---> FAST PATH <---> Target-Sever({}:{})", host, port);
-                startBlindTunnel(ctx, host, port);
+                LOGGER.info("CLIENT <---> TLS FAST PATH <---> Target-Sever({}:{})", host, port);
+                startBlindTunnel(ctx, host, port, null);
             }
+        } else {
+            // --- PLAIN HTTP TRAFFIC ---
+            String host = request.headers().get(HttpHeaderNames.HOST);
+            int port = 80;
+
+            if (host != null && host.contains(":")) {
+                String[] parts = host.split(":");
+                host = parts[0];
+                port = Integer.parseInt(parts[1]);
+            } else if (host == null) {
+                // Fallback if Host header is missing
+                java.net.URI uri = java.net.URI.create(request.uri());
+                host = uri.getHost();
+                port = uri.getPort() == -1 ? 80 : uri.getPort();
+            }
+
+            LOGGER.info("CLIENT ---> PROXY: HTTP {} {}:{}", request.method(), host, port);
+            ctx.channel().config().setAutoRead(false);
+
+            ctx.pipeline().remove(HttpServerCodec.class);
+            ctx.pipeline().remove(HttpObjectAggregator.class);
+            ctx.pipeline().remove(ConnectHandler.this);
+
+            // Retain the request so SimpleChannelInboundHandler doesn't destroy it
+            request.retain();
+
+            // Forward it to the blind tunnel
+            LOGGER.info("CLIENT <---> HTTP FAST PATH <---> Target-Sever({}:{})", host, port);
+            startBlindTunnel(ctx, host, port, request);
         }
     }
 
@@ -59,14 +88,17 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
 
     }
 
-    private void startBlindTunnel(ChannelHandlerContext clientCtx, String host, int port) {
+    private void startBlindTunnel(ChannelHandlerContext clientCtx, String host, int port, FullHttpRequest initialRequest) {
         Bootstrap b = new Bootstrap();
         b.group(clientCtx.channel().eventLoop())
                 .channel(clientCtx.channel().getClass())
                 .handler(new ChannelInitializer<>() {
                     @Override
                     protected void initChannel(Channel ch) {
-                        // Intentionally empty init; we add handlers later
+                        // If we have an initial HTTP request to send, we need an encoder temporarily
+                        if (initialRequest != null) {
+                            ch.pipeline().addLast(new HttpRequestEncoder());
+                        }
                     }
                 });
 
@@ -78,8 +110,23 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
                 // Just bridge inbound channel & outbound channel for non-targets
                 clientChannel.pipeline().addLast(new SimpleBlindRelayHandler(remoteChannel));
                 remoteChannel.pipeline().addLast(new SimpleBlindRelayHandler(clientChannel));
-                clientCtx.channel().config().setAutoRead(true);
+
+                if (initialRequest != null) {
+                    // Send the swallowed HTTP request to the target
+                    remoteChannel.writeAndFlush(initialRequest).addListener(writeF -> {
+                        // Remove the encoder so it becomes a raw byte pipe
+                        remoteChannel.pipeline().remove(HttpRequestEncoder.class);
+                        clientCtx.channel().config().setAutoRead(true);
+                    });
+                } else {
+                    // CONNECT mode: just open the floodgates
+                    clientCtx.channel().config().setAutoRead(true);
+                }
+
             } else {
+                if (initialRequest != null) {
+                    initialRequest.release();
+                }
                 clientCtx.close();
             }
         });
