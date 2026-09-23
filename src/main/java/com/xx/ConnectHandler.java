@@ -5,6 +5,7 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.handler.codec.http.*;
 import io.netty.handler.ssl.SslHandler;
+import io.netty.util.concurrent.Future;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,13 +33,20 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             ctx.pipeline().remove(HttpObjectAggregator.class);
             ctx.pipeline().remove(ConnectHandler.this);
 
-            if (TrafficSelector.isTarget(host, port)) {
-                LOGGER.info("CLIENT <---> TLS MITM PROXY <---> Target-Sever({}:{})", host, port);
-                startMitmTunnel(ctx, host, port);
-            } else {
-                LOGGER.info("CLIENT <---> TLS FAST PATH <---> Target-Sever({}:{})", host, port);
-                startBlindTunnel(ctx, host, port, null);
-            }
+            // Ask the server which HTTPS protocol it speaks before touching the
+            // pipeline: a throwaway connection gets a standard-TLS ClientHello and,
+            // only if that is rejected, a TLCP one. The answer is cached per
+            // host:port. Inbound reads stay switched off meanwhile, so not a single
+            // client byte is lost or forwarded before we know what to do with it.
+            ProtocolProbe.detect(host, port, ctx.channel())
+                    .addListener((Future<UpstreamProtocol> f) -> {
+                        UpstreamProtocol protocol = f.isSuccess() ? f.getNow() : UpstreamProtocol.UNKNOWN;
+                        if (protocol == UpstreamProtocol.UNKNOWN) {
+                            LOGGER.warn("PROBE {}:{}: inconclusive, relaying - the server is either "
+                                    + "unreachable or refused both ClientHellos", host, port);
+                        }
+                        assemble(ctx, host, port, protocol);
+                    });
         } else {
             // --- PLAIN HTTP TRAFFIC ---
             String host = request.headers().get(HttpHeaderNames.HOST);
@@ -68,6 +76,27 @@ public class ConnectHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             // Forward it to the blind tunnel
             LOGGER.info("CLIENT <---> HTTP FAST PATH <---> Target-Sever({}:{})", host, port);
             startBlindTunnel(ctx, host, port, request);
+        }
+    }
+
+    /**
+     * MITM if and only if the server speaks nothing but 国密; everything else -
+     * including an inconclusive probe - keeps the existing blind relay.
+     *
+     * <p>{@link ProtocolProbe#detect} notifies its listeners on the event loop of
+     * the channel we handed it, so the pipeline can be modified right here.
+     */
+    private void assemble(ChannelHandlerContext ctx, String host, int port, UpstreamProtocol protocol) {
+        if (!ctx.channel().isActive()) {
+            LOGGER.info("Client is gone while probing {}:{}, aborting", host, port);
+            return;
+        }
+        if (protocol == UpstreamProtocol.GM_ONLY) {
+            LOGGER.info("CLIENT <---> TLS MITM PROXY <---> Target-Sever({}:{}) [{}]", host, port, protocol);
+            startMitmTunnel(ctx, host, port);
+        } else {
+            LOGGER.info("CLIENT <---> TLS FAST PATH <---> Target-Sever({}:{}) [{}]", host, port, protocol);
+            startBlindTunnel(ctx, host, port, null);
         }
     }
 

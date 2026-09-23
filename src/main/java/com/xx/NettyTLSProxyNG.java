@@ -98,11 +98,10 @@ public class NettyTLSProxyNG {
         // warmup for SERVER_SSL_CONTEXT
         engine.setUseClientMode(true);
         engine.beginHandshake();
-        for (String host : TrafficSelector.getHosts()) {
-            LOGGER.info("Generating self-signed certificate for host {}", host);
-            EccCertCache.getServerContext(host);
-        }
 
+        // No host list to warm up any more: whether a target needs a forged
+        // certificate is decided per CONNECT by ProtocolProbe, so certificates
+        // are minted on demand and cached by EccCertCache.
     }
 
 
